@@ -1,0 +1,73 @@
+name: Build Setup EXE
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'installer/**'
+      - 'scripts/**'
+      - 'INSTALL.cmd'
+      - '.github/workflows/build-setup.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-2022
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Generate resources
+        shell: pwsh
+        run: |
+          $root = (Get-Location).Path
+          $esc = { param($p) ($p -replace '\\','\\\\') }
+          $lines = @(
+            'PAYLOAD_INSTALL_CMD RCDATA "' + (&$esc (Join-Path $root 'INSTALL.cmd')) + '"',
+            'PAYLOAD_COMMON_PS1 RCDATA "' + (&$esc (Join-Path $root 'scripts\common.ps1')) + '"',
+            'PAYLOAD_INSTALL_PS1 RCDATA "' + (&$esc (Join-Path $root 'scripts\install.ps1')) + '"',
+            'PAYLOAD_UPDATE_PS1 RCDATA "' + (&$esc (Join-Path $root 'scripts\update-xray.ps1')) + '"',
+            'PAYLOAD_REPAIR_PS1 RCDATA "' + (&$esc (Join-Path $root 'scripts\repair.ps1')) + '"',
+            'PAYLOAD_DIAG_PS1 RCDATA "' + (&$esc (Join-Path $root 'scripts\diag.ps1')) + '"'
+          )
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Set-Content -Path installer\payload.rc -Value $lines -Encoding ASCII
+          Get-Content installer\payload.rc
+
+      - name: Setup MSVC
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Compile native Win7-compatible bootstrapper
+        shell: cmd
+        run: |
+          rc /nologo /fo installer\payload.res installer\payload.rc
+          cl /nologo /O2 /MT /EHsc /DUNICODE /D_UNICODE installer\bootstrapper.cpp installer\payload.res /link /SUBSYSTEM:CONSOLE,6.01 /OUT:dist\v2rayN-Win7-Remnawave-Setup.exe shell32.lib
+
+      - name: Show SHA256
+        shell: pwsh
+        run: Get-FileHash dist\v2rayN-Win7-Remnawave-Setup.exe -Algorithm SHA256 | Format-List
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: v2rayN-Win7-Remnawave-Setup
+          path: dist/v2rayN-Win7-Remnawave-Setup.exe
+          if-no-files-found: error
+
+      - name: Publish rolling release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = 'win7-latest'
+          gh release view $tag *> $null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create $tag dist/v2rayN-Win7-Remnawave-Setup.exe --title 'Windows 7 latest installer' --notes 'Rolling Windows 7 x64 installer. Uses v2rayN 7.16.9 and the latest official Xray-win7-64 asset found at install time.' --latest=false
+          } else {
+            gh release upload $tag dist/v2rayN-Win7-Remnawave-Setup.exe --clobber
+          }

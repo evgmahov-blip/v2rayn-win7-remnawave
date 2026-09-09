@@ -1,15 +1,9 @@
 Set-StrictMode -Version 2
 $ErrorActionPreference = 'Stop'
 
-function Write-Header([string]$Name) {
-    Write-Host ('#################### НАЧАЛО ВЫВОДА: ' + $Name + ' ####################')
-}
-function Write-Footer([string]$Name) {
-    Write-Host ('#################### КОНЕЦ ВЫВОДА: ' + $Name + ' ####################')
-}
-function Enable-Tls12 {
-    try { [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor 3072 } catch {}
-}
+function Write-Header([string]$Name) { Write-Host ('#################### НАЧАЛО ВЫВОДА: ' + $Name + ' ####################') }
+function Write-Footer([string]$Name) { Write-Host ('#################### КОНЕЦ ВЫВОДА: ' + $Name + ' ####################') }
+function Enable-Tls12 { try { [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor 3072 } catch {} }
 function New-WebClient {
     Enable-Tls12
     $wc = New-Object Net.WebClient
@@ -24,6 +18,12 @@ function Get-Text([string]$Url) {
     $wc = New-WebClient
     try { return $wc.DownloadString($Url) } finally { $wc.Dispose() }
 }
+function ConvertFrom-JsonCompat([string]$Json) {
+    Add-Type -AssemblyName System.Web.Extensions
+    $ser = New-Object System.Web.Script.Serialization.JavaScriptSerializer
+    $ser.MaxJsonLength = 67108864
+    return $ser.DeserializeObject($Json)
+}
 function Expand-ZipCompat([string]$Zip,[string]$Destination) {
     if (Test-Path $Destination) { Remove-Item $Destination -Recurse -Force }
     New-Item -ItemType Directory -Force -Path $Destination | Out-Null
@@ -31,8 +31,14 @@ function Expand-ZipCompat([string]$Zip,[string]$Destination) {
     $src = $shell.NameSpace($Zip)
     $dst = $shell.NameSpace($Destination)
     if ($src -eq $null -or $dst -eq $null) { throw 'Не удалось открыть ZIP через Shell.Application' }
+    $expected = $src.Items().Count
     $dst.CopyHere($src.Items(), 16)
-    Start-Sleep -Seconds 2
+    $deadline = (Get-Date).AddMinutes(5)
+    do {
+        Start-Sleep -Milliseconds 500
+        $count = @(Get-ChildItem $Destination -Recurse -ErrorAction SilentlyContinue).Count
+        if ((Get-Date) -gt $deadline) { throw 'Таймаут распаковки ZIP.' }
+    } while ($count -lt $expected)
 }
 function Get-Sha256([string]$Path) {
     $sha = [Security.Cryptography.SHA256]::Create()
@@ -49,11 +55,14 @@ function Assert-Win7x64 {
 }
 function Get-LatestXrayWin7Asset {
     $json = Get-Text 'https://api.github.com/repos/XTLS/Xray-core/releases?per_page=20'
-    $releases = $json | ConvertFrom-Json
+    $releases = ConvertFrom-JsonCompat $json
     foreach ($r in $releases) {
-        foreach ($a in $r.assets) {
-            if ($a.name -eq 'Xray-win7-64.zip') {
-                return New-Object PSObject -Property @{ Tag=$r.tag_name; Url=$a.browser_download_url; Digest=$a.digest }
+        $assets = $r['assets']
+        foreach ($a in $assets) {
+            if ($a['name'] -eq 'Xray-win7-64.zip') {
+                $digest = $null
+                if ($a.ContainsKey('digest')) { $digest = $a['digest'] }
+                return New-Object PSObject -Property @{ Tag=$r['tag_name']; Url=$a['browser_download_url']; Digest=$digest }
             }
         }
     }
@@ -77,7 +86,7 @@ function Install-XrayWin7([string]$InstallDir) {
         Expand-ZipCompat $zip $unpack
         $target = Join-Path $InstallDir 'bin\xray'
         New-Item -ItemType Directory -Force -Path $target | Out-Null
-        Get-ChildItem $unpack -File | ForEach-Object { Copy-Item $_.FullName (Join-Path $target $_.Name) -Force }
+        Get-ChildItem $unpack | Where-Object { -not $_.PSIsContainer } | ForEach-Object { Copy-Item $_.FullName (Join-Path $target $_.Name) -Force }
         $exe = Join-Path $target 'xray.exe'
         if (-not (Test-Path $exe)) { throw 'После распаковки xray.exe не найден.' }
         $ver = & $exe version 2>&1 | Select-Object -First 1
